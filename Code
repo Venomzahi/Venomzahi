@@ -1,0 +1,241 @@
+import pandas as pd
+import numpy as np
+import json
+import requests
+from datetime import datetime
+import matplotlib.pyplot as plt
+def load_current_quiz_data(url: str) -> pd.DataFrame:
+    """
+    Load current quiz submission data from a given URL.
+    Expected JSON format:
+    {
+        "user_id": "123",
+        "quiz_id": "abc",
+        "submitted_at": "2025-01-31T12:34:56",
+        "questions": [
+            {
+                "question_id": "q1",
+                "topic": "Anatomy",
+                "difficulty": "Medium",
+                "correct_option": "opt2",
+                "selected_option": "opt1"
+            },
+            ...
+        ]
+    }
+    """
+    response = requests.get(url)
+    response.raise_for_status()  # Raise error if request fails
+    data = response.json()
+    
+    # Flatten the questions list into a DataFrame
+    quiz_data = pd.DataFrame(data.get("questions", []))
+    quiz_data["user_id"] = data.get("user_id")
+    quiz_data["quiz_id"] = data.get("quiz_id")
+    quiz_data["submitted_at"] = pd.to_datetime(data.get("submitted_at"))
+    return quiz_data
+
+def load_historical_quiz_data(urls: list) -> pd.DataFrame:
+    """
+    Load historical quiz performance data from a list of URLs.
+    Expected JSON format for each URL is a list of quiz records:
+    [
+        {
+            "user_id": "123",
+            "quiz_id": "quiz1",
+            "score": 80,
+            "submitted_at": "2025-01-25T10:00:00",
+            "response_map": {
+                "q1": "opt2",
+                "q2": "opt1",
+                ...
+            },
+            "details": [
+                {
+                    "question_id": "q1",
+                    "topic": "Anatomy",
+                    "difficulty": "Medium",
+                    "correct_option": "opt2",
+                    "selected_option": "opt2"
+                },
+                ...
+            ]
+        },
+        ...
+    ]
+    The function fetches the data from all URLs, extracts detailed records, and combines them.
+    """
+    records = []
+    for url in urls:
+        response = requests.get(url)
+        response.raise_for_status()
+        quizzes = response.json()
+        for quiz in quizzes:
+            for detail in quiz.get("details", []):
+                record = {
+                    "user_id": quiz["user_id"],
+                    "quiz_id": quiz["quiz_id"],
+                    "score": quiz["score"],
+                    "submitted_at": pd.to_datetime(quiz["submitted_at"]),
+                    "question_id": detail.get("question_id"),
+                    "topic": detail.get("topic"),
+                    "difficulty": detail.get("difficulty"),
+                    "correct_option": detail.get("correct_option"),
+                    "selected_option": detail.get("selected_option")
+                }
+                records.append(record)
+    hist_df = pd.DataFrame(records)
+    return hist_df
+def analyze_current_quiz(quiz_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Analyze the current quiz submission data by comparing the selected option
+    with the correct option for each question. Adds a column 'is_correct'.
+    """
+    quiz_df['is_correct'] = quiz_df.apply(
+        lambda row: row['selected_option'] == row['correct_option'], axis=1
+    )
+    return quiz_df
+
+def topic_performance(quiz_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute performance by topic for the provided quiz DataFrame.
+    Returns a DataFrame with each topic's total questions, number correct, and accuracy.
+    """
+    grouped = quiz_df.groupby("topic").agg(
+        total_questions=pd.NamedAgg(column="question_id", aggfunc="count"),
+        correct_answers=pd.NamedAgg(column="is_correct", aggfunc="sum")
+    ).reset_index()
+    grouped["accuracy"] = (grouped["correct_answers"] / grouped["total_questions"]) * 100
+    return grouped
+
+def difficulty_performance(quiz_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute performance by difficulty level for the provided quiz DataFrame.
+    Returns a DataFrame with each difficulty's total questions, number correct, and accuracy.
+    """
+    grouped = quiz_df.groupby("difficulty").agg(
+        total_questions=pd.NamedAgg(column="question_id", aggfunc="count"),
+        correct_answers=pd.NamedAgg(column="is_correct", aggfunc="sum")
+    ).reset_index()
+    grouped["accuracy"] = (grouped["correct_answers"] / grouped["total_questions"]) * 100
+    return grouped
+
+def historical_trend(hist_df: pd.DataFrame, user_id: str) -> pd.DataFrame:
+    """
+    Extract and sort historical quiz scores for the given user.
+    Returns a DataFrame with submission dates and corresponding scores.
+    """
+    # Each quiz record is unique by quiz_id; drop duplicate quiz_id records
+    user_data = hist_df[hist_df["user_id"] == user_id].drop_duplicates(subset=["quiz_id"])
+    trend = user_data[["submitted_at", "score"]].sort_values("submitted_at")
+    return trend
+def generate_recommendations(current_analysis: pd.DataFrame, hist_trend: pd.DataFrame, accuracy_threshold: float = 60.0) -> dict:
+    """
+    Based on the current quiz analysis and historical trend, generate recommendations.
+    
+    Recommendations include:
+      - Topics where the accuracy is below the threshold.
+      - Difficulty levels to focus on if performance is weak.
+      - Historical trend assessment to suggest further action.
+    
+    Returns:
+        dict: A dictionary containing recommendation details.
+    """
+    recommendations = {}
+
+    # 1. Topics for Improvement
+    topics_df = topic_performance(current_analysis)
+    weak_topics = topics_df[topics_df["accuracy"] < accuracy_threshold]["topic"].tolist()
+    if weak_topics:
+        recommendations["topics_to_review"] = weak_topics
+    else:
+        recommendations["topics_to_review"] = "No weak topics identified. Keep up the good work!"
+
+    # 2. Difficulty Level Adjustments
+    diff_df = difficulty_performance(current_analysis)
+    weak_difficulties = diff_df[diff_df["accuracy"] < accuracy_threshold]["difficulty"].tolist()
+    if weak_difficulties:
+        recommendations["difficulties_to_focus"] = weak_difficulties
+    else:
+        recommendations["difficulties_to_focus"] = "All difficulty levels seem fine."
+
+    # 3. Historical Trend Analysis
+    if not hist_trend.empty:
+        first_score = hist_trend.iloc[0]["score"]
+        last_score = hist_trend.iloc[-1]["score"]
+        if last_score > first_score:
+            trend_direction = "improving"
+        elif last_score < first_score:
+            trend_direction = "declining"
+        else:
+            trend_direction = "stagnant"
+        recommendations["historical_trend"] = {
+            "first_score": first_score,
+            "last_score": last_score,
+            "trend": trend_direction
+        }
+        if trend_direction in ["declining", "stagnant"]:
+            recommendations["action"] = (
+                "Consider revisiting previous quizzes, analyzing errors, "
+                "and practicing more consistently."
+            )
+        else:
+            recommendations["action"] = (
+                "Keep up the good progress and consider tackling higher-difficulty "
+                "questions for a further challenge."
+            )
+    else:
+        recommendations["historical_trend"] = "No historical data available."
+
+    return recommendations
+def main():
+    # Define the URLs for the three data sources:
+    current_quiz_url = "https://jsonkeeper.com/b/LLQT"
+    historical_quiz_urls = [
+        "https://api.jsonserve.com/rJvd7g",
+        "https://api.jsonserve.com/XgAgFJ"
+    ]
+    
+    # Load data from URLs
+    print("Loading current quiz data...")
+    current_quiz_df = load_current_quiz_data(current_quiz_url)
+    print("Loading historical quiz data...")
+    historical_quiz_df = load_historical_quiz_data(historical_quiz_urls)
+    
+    # Analyze current quiz data
+    current_quiz_df = analyze_current_quiz(current_quiz_df)
+    
+    # Display performance by topic and difficulty for the current quiz
+    print("\nCurrent Quiz Topic Performance:")
+    topic_perf = topic_performance(current_quiz_df)
+    print(topic_perf.to_string(index=False))
+    
+    print("\nCurrent Quiz Difficulty Performance:")
+    diff_perf = difficulty_performance(current_quiz_df)
+    print(diff_perf.to_string(index=False))
+    
+    # Assume the current quiz data contains the user_id we want to analyze historically
+    user_id = current_quiz_df["user_id"].iloc[0]
+    hist_trend_df = historical_trend(historical_quiz_df, user_id)
+    print("\nHistorical Trend (Quiz Scores):")
+    print(hist_trend_df.to_string(index=False))
+    
+    # Generate recommendations based on current performance and historical trend
+    recommendations = generate_recommendations(current_quiz_df, hist_trend_df, accuracy_threshold=60.0)
+    print("\nPersonalized Recommendations:")
+    for key, value in recommendations.items():
+        print(f"{key}: {value}")
+
+    # (Optional) Plot historical trend
+    if not hist_trend_df.empty:
+        plt.figure(figsize=(8, 4))
+        plt.plot(hist_trend_df["submitted_at"], hist_trend_df["score"], marker="o", linestyle="-")
+        plt.title("Historical Quiz Performance")
+        plt.xlabel("Submission Date")
+        plt.ylabel("Score")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+if __name__ == "__main__":
+    main()
